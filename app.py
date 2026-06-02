@@ -44,6 +44,10 @@ try:
     YOLO_OK = True
 except ImportError:
     YOLO_OK = False
+    YOLO_IMPORT_ERROR = "Ultralytics is not installed."
+except Exception as e:
+    YOLO_OK = False
+    YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 try:
     from streamlit_image_coordinates import streamlit_image_coordinates
@@ -591,7 +595,7 @@ def run_side_inference(img_bgr, model, device):
     scores   = out["scores"][keep].cpu().numpy()
     kps_all  = out["keypoints"][keep].cpu().numpy()
     boxes  = out["boxes"][keep].cpu().numpy()
-    if len(scores)==0: return None, None
+    if len(scores)==0: return None, None, None
     best = int(np.argmax(scores))
     return kps_all[best], float(scores[best]), boxes[best]
 
@@ -635,7 +639,8 @@ def compute_side_measurements(kps, cmp,bbox=None):
     chest_height_cm       = px_cm(chest_height_px,       cmp)
     linear_body_depth_cm  = px_cm(linear_body_depth_px,  cmp)
     rump_vertical_cm      = (rump_vertical_px * cmp) if (rump_vertical_px is not None and cmp) else None
-    rump_vertical_cm      = rump_vertical_cm -5;
+    if rump_vertical_cm is not None:
+        rump_vertical_cm -= 5
     # Derived
     heart_girth_cm  = (1.588 * chest_height_cm + 73.43) if chest_height_cm else None
     body_weight_kg  = ((heart_girth_cm**2 * body_length_cm) / 10840.0
@@ -1481,8 +1486,16 @@ if st.session_state.nav == "Measure":
                                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                             else:
                                 st.warning("No cattle detected in rear-view image.")
+                    elif not YOLO_OK:
+                        st.error(
+                            "Rear-view inference is unavailable because "
+                            f"Ultralytics failed to import: {YOLO_IMPORT_ERROR}"
+                        )
                     else:
-                        st.warning("Rear-view model not found — skipping rear-view.")
+                        st.warning(
+                            "Rear-view model is missing and no Google Drive URL "
+                            "is configured — skipping rear-view."
+                        )
                 except Exception as e:
                     st.error(f"Rear-view error: {e}")
                     import traceback; st.code(traceback.format_exc())
@@ -1500,7 +1513,13 @@ if st.session_state.nav == "Measure":
             append_log(log_entry)
             save_excel_log(load_logs())
 
-        st.rerun()
+        if side_m or rear_m:
+            st.success("Trait measurements completed.")
+        else:
+            st.error(
+                "No trait measurements were produced. Review the messages "
+                "above, confirm that the cattle is clearly visible, and try again."
+            )
 
     # ── DISPLAY TRAITS ────────────────────────────────────────────────────────
     if st.session_state.traits:
