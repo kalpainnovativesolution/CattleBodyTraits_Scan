@@ -32,9 +32,9 @@ try:
     from torchvision.models.detection import KeypointRCNN
     from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
     TORCH_OK = True
-except ImportError:
+except ImportError as e:
     TORCH_OK = False
-    TORCH_IMPORT_ERROR = "PyTorch or torchvision is not installed."
+    TORCH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 except Exception as e:
     TORCH_OK = False
     TORCH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
@@ -42,9 +42,9 @@ except Exception as e:
 try:
     from ultralytics import YOLO, SAM
     YOLO_OK = True
-except ImportError:
+except ImportError as e:
     YOLO_OK = False
-    YOLO_IMPORT_ERROR = "Ultralytics is not installed."
+    YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 except Exception as e:
     YOLO_OK = False
     YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
