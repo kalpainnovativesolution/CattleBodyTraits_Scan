@@ -38,6 +38,46 @@ The app opens at **http://localhost:8501** in your browser.
 
 ---
 
+## Publish on GitHub and Streamlit Community Cloud
+
+The trained models are not committed to GitHub. The app downloads missing
+models from the configured public Google Drive links when they are first
+needed.
+
+Upload these files to a new GitHub repository:
+
+```text
+.gitignore
+app.py
+model_files.py
+packages.txt
+requirements.txt
+README.md
+```
+
+Do not upload the `.pt`, `.pth`, or `.pkl` model files.
+
+To deploy:
+
+1. Open Streamlit Community Cloud and create a new app from the GitHub repo.
+2. Select `app.py` as the main file.
+3. Open **Advanced settings** and select a supported Python version. Python
+   3.12 is recommended and the pinned CPU wheels also support Python 3.14.
+4. Deploy the app.
+
+The first sticker click or estimate can take longer while the required models
+download and load. Later actions reuse the downloaded files and Streamlit's
+resource cache.
+
+`packages.txt` installs only `libgl1`, which provides `libGL.so.1` for the
+OpenCV dependency installed by Ultralytics.
+
+The requirements use the official PyTorch CPU wheel index with the matched
+pair `torch==2.9.0+cpu` and `torchvision==0.24.0+cpu`. Pip selects the wheel
+for the deployed Python runtime without installing unused CUDA packages.
+
+---
+
 ## Usage
 
 | Step | Action |
