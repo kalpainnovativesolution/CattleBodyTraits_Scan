@@ -23,6 +23,7 @@ import streamlit as st
 from PIL import Image
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from model_files import ensure_model_file, model_file_available
 
 # ── optional heavy imports ────────────────────────────────────────────────────
 try:
@@ -33,6 +34,10 @@ try:
     TORCH_OK = True
 except ImportError:
     TORCH_OK = False
+    TORCH_IMPORT_ERROR = "PyTorch or torchvision is not installed."
+except Exception as e:
+    TORCH_OK = False
+    TORCH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 try:
     from ultralytics import YOLO, SAM
@@ -447,6 +452,7 @@ init_state()
 def load_side_model(ckpt_path):
     if not TORCH_OK:
         return None
+    ckpt_path = ensure_model_file(ckpt_path)
     backbone = resnet_fpn_backbone(backbone_name='resnet101', weights=None)
     model    = KeypointRCNN(backbone, num_classes=NUM_CLASSES,
                             num_keypoints=NUM_KEYPOINTS)
@@ -461,6 +467,7 @@ def load_side_model(ckpt_path):
 def load_rear_model(yolo_path):
     if not YOLO_OK:
         return None
+    yolo_path = ensure_model_file(yolo_path)
     return YOLO(yolo_path)
 
 @st.cache_resource(show_spinner="Loading SAM2…")
@@ -468,6 +475,7 @@ def load_sam2(sam2_path):
     if not YOLO_OK:
         return None
     try:
+        sam2_path = ensure_model_file(sam2_path)
         return SAM(sam2_path)
     except Exception as e:
         st.warning(f"SAM2 load failed: {e}")
@@ -475,6 +483,10 @@ def load_sam2(sam2_path):
 
 @st.cache_resource(show_spinner="Loading RF score model…")
 def load_rf_model(pkl_path):
+    try:
+        pkl_path = ensure_model_file(pkl_path)
+    except Exception:
+        return None
     try:
         with open(pkl_path, "rb") as f:
             return pickle.load(f)
@@ -1250,7 +1262,7 @@ if st.session_state.nav == "Measure":
                         if st.session_state.side_last_processed_click != orig_xy:
                             st.session_state.side_last_processed_click = orig_xy
                             with st.spinner("Segmenting sticker with SAM2…"):
-                                sam2 = load_sam2(sam2_path) if os.path.exists(sam2_path) else None
+                                sam2 = load_sam2(sam2_path) if model_file_available(sam2_path) else None
                                 if sam2:
                                     cmp, _ = segment_sticker_sam2(img_raw, orig_xy, sam2)
                                 else:
@@ -1339,7 +1351,7 @@ if st.session_state.nav == "Measure":
                         if st.session_state.rear_last_processed_click != orig_xy:
                             st.session_state.rear_last_processed_click = orig_xy
                             with st.spinner("Segmenting sticker with SAM2…"):
-                                sam2 = load_sam2(sam2_path) if os.path.exists(sam2_path) else None
+                                sam2 = load_sam2(sam2_path) if model_file_available(sam2_path) else None
                                 if sam2:
                                     cmp, _ = segment_sticker_sam2(img_raw, orig_xy, sam2)
                                 else:
@@ -1396,7 +1408,7 @@ if st.session_state.nav == "Measure":
         if side_ready:
             with st.spinner("Running side-view keypoint detection…"):
                 try:
-                    if TORCH_OK and os.path.exists(side_ckpt):
+                    if TORCH_OK and model_file_available(side_ckpt):
                         result = load_side_model(side_ckpt)
                         if result is None:
                             st.warning("Side-view model failed to load.")
@@ -1416,8 +1428,16 @@ if st.session_state.nav == "Measure":
                                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                             else:
                                 st.warning("No cattle detected in side-view image.")
+                    elif not TORCH_OK:
+                        st.error(
+                            "Side-view inference is unavailable because PyTorch "
+                            f"or torchvision failed to import: {TORCH_IMPORT_ERROR}"
+                        )
                     else:
-                        st.warning("Side-view model not found — skipping side-view.")
+                        st.warning(
+                            "Side-view model is missing and no Google Drive URL "
+                            "is configured — skipping side-view."
+                        )
                 except Exception as e:
                     st.error(f"Side-view error: {e}")
                     import traceback; st.code(traceback.format_exc())
@@ -1425,7 +1445,7 @@ if st.session_state.nav == "Measure":
         if rear_ready:
             with st.spinner("Running rear-view keypoint detection…"):
                 try:
-                    if YOLO_OK and os.path.exists(rear_model):
+                    if YOLO_OK and model_file_available(rear_model):
                         yolo     = load_rear_model(rear_model)
                         if yolo is None:
                             st.warning("Rear-view model failed to load.")
@@ -1437,7 +1457,7 @@ if st.session_state.nav == "Measure":
                                 dists, la, ra, udder_ht = compute_rear_measurements(kps_dict, cmp)
                                 rf_score  = None
                                 hock_dist = dists.get("M20_left_hock-right_hock")
-                                if os.path.exists(rf_pkl):
+                                if model_file_available(rf_pkl):
                                     try:
                                         rf = load_rf_model(rf_pkl)
                                     except Exception:
