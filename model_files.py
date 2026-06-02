@@ -38,7 +38,6 @@ def ensure_model_file(filename):
             url=url,
             output=str(partial_path),
             quiet=False,
-            fuzzy=True,
         )
         if not downloaded or not partial_path.exists():
             raise RuntimeError(
@@ -50,4 +49,3 @@ def ensure_model_file(filename):
             partial_path.unlink()
 
     return str(path)
-
