@@ -625,6 +625,7 @@ def compute_side_measurements(kps, cmp,bbox=None):
     linear_body_depth_cm  = px_cm(linear_body_depth_px,  cmp)
     rump_vertical_cm      = (rump_vertical_px * cmp) if (rump_vertical_px is not None and cmp) else None
     rump_vertical_cm      = rump_vertical_cm -5;
+    body_length_cm       =  0.9334*body_length_cm + 0.4344*linear_body_depth_cm-7.75 if body_length_cm else None
     # Derived
     heart_girth_cm  = (1.588 * chest_height_cm + 73.43) if chest_height_cm else None
     body_weight_kg  = ((heart_girth_cm**2 * body_length_cm) / 10840.0
@@ -1092,13 +1093,14 @@ def resize_for_display(img_bgr, max_w=620, max_h=460):
 # Column name in ground_truth.xlsx  →  internal key used everywhere below
 _GT_COL_MAP = {
     "Height (cm)":                 "height",
-    "Body length (cm)":            "body_length",
-    "Body depth (cm)":             "body_depth",
+    "Body length  (cm)":            "body_length",
+    "Body depth  (cm)":             "body_depth",
     "Girth (cm)":                  "heart_girth",
-    "Rear legs set (score)":       "rear_leg_set",
+    "Rear legs set  (score)":       "rear_leg_set",
     "Rear legs rear view (score)": "rear_leg_rear",
-    "Rump width (cm)":             "rump_width",
-    "Rear udder height (cm)":      "rear_udder_height",
+    "Rump angle   (cm)": "rump_angle",
+    "Rump width  (cm)":             "rump_width",
+    "Rear udder height  (cm)":      "rear_udder_height",
     "Foot angle (score)":          "foot_angle_score",
 }
 
@@ -1690,6 +1692,7 @@ if st.session_state.nav == "Measure":
                                   if sm.get("rear_leg_set_score") is not None else None),
             "rear_leg_rear":     (float(rm["rf_score"])
                                   if rm.get("rf_score") is not None else None),
+            "rump_angle": _est_num(["rump_vertical_cm"]),
             "rump_width":        _est_num(["M03_rump_left-rump_right"]),
             "rear_udder_height": _est_num(["rear_udder_height_cm"]),
             "foot_angle_score":  (float(sm["foot_angle_score"])
@@ -1728,11 +1731,7 @@ if st.session_state.nav == "Measure":
                   <div class="tc-value">{_gt_fmt("rear_leg_rear", is_score=True)}</div>
                   <div class="tc-unit">1–9 scale</div>
                 </div>""" +
-                """<div class="trait-card">
-                  <div class="tc-label">Rump Angle</div>
-                  <div class="tc-value">—</div>
-                  <div class="tc-unit">cm (signed)</div>
-                </div>""" +
+                _tc("Rump Angle", gt.get("rump_angle"), "cm") +
                 _tc("Rump Width",        gt.get("rump_width"),        "cm") +
                 _tc("Rear Udder Height", gt.get("rear_udder_height"), "cm") +
                 f"""<div class="trait-card">
@@ -1795,11 +1794,7 @@ if st.session_state.nav == "Measure":
                 _dev_card("Rear Leg Set",       "rear_leg_set",      "1–9 scale", is_score=True) +
                 _dev_card("Rear Leg Rear View", "rear_leg_rear",     "1–9 scale", is_score=True) +
                 # Rump Angle has no GT column — always N/A
-                '<div class="trait-card">'
-                '<div class="tc-label">Rump Angle</div>'
-                '<div class="tc-value" style="color:#90caf9;">—</div>'
-                '<div class="tc-unit">cm (signed)</div>'
-                '</div>' +
+                _dev_card("Rump Angle", "rump_angle", "cm") +
                 _dev_card("Rump Width",         "rump_width",        "cm") +
                 _dev_card("Rear Udder Height",  "rear_udder_height", "cm") +
                 _dev_card("Foot Angle Score",   "foot_angle_score",  "1–9 scale", is_score=True)
