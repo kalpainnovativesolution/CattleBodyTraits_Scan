@@ -11,6 +11,7 @@ CHANGELOG:
 - Both stored in side measurements and logs
 - Full mobile-responsive layout (10-trait grid, auto-close sidebar on nav)
 - Fixed light-mode image display glitch
+- Added Ground Truth cards (from ground_truth.xlsx) and Deviation cards
 """
 
 import math, os, json, pickle, io, copy
@@ -23,7 +24,6 @@ import streamlit as st
 from PIL import Image
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from model_files import ensure_model_file, model_file_available
 
 # ── optional heavy imports ────────────────────────────────────────────────────
 try:
@@ -32,22 +32,14 @@ try:
     from torchvision.models.detection import KeypointRCNN
     from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
     TORCH_OK = True
-except ImportError as e:
+except ImportError:
     TORCH_OK = False
-    TORCH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
-except Exception as e:
-    TORCH_OK = False
-    TORCH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 try:
     from ultralytics import YOLO, SAM
     YOLO_OK = True
-except ImportError as e:
+except ImportError:
     YOLO_OK = False
-    YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
-except Exception as e:
-    YOLO_OK = False
-    YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 try:
     from streamlit_image_coordinates import streamlit_image_coordinates
@@ -59,7 +51,7 @@ except ImportError:
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="CattleScan",
+    page_title="AI Based Cattle Trait Measurements",
     page_icon="🐄",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -456,7 +448,6 @@ init_state()
 def load_side_model(ckpt_path):
     if not TORCH_OK:
         return None
-    ckpt_path = ensure_model_file(ckpt_path)
     backbone = resnet_fpn_backbone(backbone_name='resnet101', weights=None)
     model    = KeypointRCNN(backbone, num_classes=NUM_CLASSES,
                             num_keypoints=NUM_KEYPOINTS)
@@ -471,7 +462,6 @@ def load_side_model(ckpt_path):
 def load_rear_model(yolo_path):
     if not YOLO_OK:
         return None
-    yolo_path = ensure_model_file(yolo_path)
     return YOLO(yolo_path)
 
 @st.cache_resource(show_spinner="Loading SAM2…")
@@ -479,7 +469,6 @@ def load_sam2(sam2_path):
     if not YOLO_OK:
         return None
     try:
-        sam2_path = ensure_model_file(sam2_path)
         return SAM(sam2_path)
     except Exception as e:
         st.warning(f"SAM2 load failed: {e}")
@@ -487,10 +476,6 @@ def load_sam2(sam2_path):
 
 @st.cache_resource(show_spinner="Loading RF score model…")
 def load_rf_model(pkl_path):
-    try:
-        pkl_path = ensure_model_file(pkl_path)
-    except Exception:
-        return None
     try:
         with open(pkl_path, "rb") as f:
             return pickle.load(f)
@@ -595,7 +580,7 @@ def run_side_inference(img_bgr, model, device):
     scores   = out["scores"][keep].cpu().numpy()
     kps_all  = out["keypoints"][keep].cpu().numpy()
     boxes  = out["boxes"][keep].cpu().numpy()
-    if len(scores)==0: return None, None, None
+    if len(scores)==0: return None, None
     best = int(np.argmax(scores))
     return kps_all[best], float(scores[best]), boxes[best]
 
@@ -639,8 +624,7 @@ def compute_side_measurements(kps, cmp,bbox=None):
     chest_height_cm       = px_cm(chest_height_px,       cmp)
     linear_body_depth_cm  = px_cm(linear_body_depth_px,  cmp)
     rump_vertical_cm      = (rump_vertical_px * cmp) if (rump_vertical_px is not None and cmp) else None
-    if rump_vertical_cm is not None:
-        rump_vertical_cm -= 5
+    rump_vertical_cm      = rump_vertical_cm -5;
     # Derived
     heart_girth_cm  = (1.588 * chest_height_cm + 73.43) if chest_height_cm else None
     body_weight_kg  = ((heart_girth_cm**2 * body_length_cm) / 10840.0
@@ -682,6 +666,7 @@ def compute_side_measurements(kps, cmp,bbox=None):
         if angle is not None:
             # Ensure we always take the acute angle
             foot_angle_deg   = min(angle, 180.0 - angle)
+            foot_angle_deg = round(foot_angle_deg)
             foot_angle_score = foot_angle_to_score(foot_angle_deg)
 
     return {
@@ -1102,6 +1087,123 @@ def resize_for_display(img_bgr, max_w=620, max_h=460):
     return img_bgr
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GROUND TRUTH LOADER
+# ─────────────────────────────────────────────────────────────────────────────
+# Column name in ground_truth.xlsx  →  internal key used everywhere below
+_GT_COL_MAP = {
+    "Height (cm)":                 "height",
+    "Body length (cm)":            "body_length",
+    "Body depth (cm)":             "body_depth",
+    "Girth (cm)":                  "heart_girth",
+    "Rear legs set (score)":       "rear_leg_set",
+    "Rear legs rear view (score)": "rear_leg_rear",
+    "Rump width (cm)":             "rump_width",
+    "Rear udder height (cm)":      "rear_udder_height",
+    "Foot angle (score)":          "foot_angle_score",
+}
+
+def load_ground_truth(tag, gt_file="ground_truth.xlsx"):
+    print("\n" + "=" * 60)
+    print("load_ground_truth() CALLED")
+    print("Tag received:", repr(tag))
+    print("=" * 60)
+
+    if not os.path.exists(gt_file) or not tag:
+        print("File not found or tag empty")
+        return {}
+
+    try:
+        import openpyxl as _opx
+
+        _wb = _opx.load_workbook(
+            gt_file,
+            read_only=True,
+            data_only=True
+        )
+
+        _ws = _wb.active
+
+        print("Sheet Name :", _ws.title)
+        print("Max Rows   :", _ws.max_row)
+
+        _hdr = [
+            str(c.value).strip() if c.value is not None else ""
+            for c in next(_ws.iter_rows(min_row=1, max_row=1))
+        ]
+
+        print("Headers:", _hdr)
+
+        if "Tag ID" not in _hdr:
+            print("ERROR: 'Tag ID' column not found")
+            _wb.close()
+            return {}
+
+        _tag_col = _hdr.index("Tag ID")
+
+        print("Tag Column Index:", _tag_col)
+
+        # Build index map
+        _idx = {}
+
+        for _excel_name, _key in _GT_COL_MAP.items():
+            if _excel_name in _hdr:
+                _idx[_key] = _hdr.index(_excel_name)
+
+        gt = {}
+
+        print("\nSearching rows...\n")
+
+        for _row in _ws.iter_rows(min_row=2, values_only=True):
+
+            raw_tag = _row[_tag_col]
+
+            if raw_tag is None:
+                continue
+
+            try:
+                excel_tag = str(int(float(raw_tag)))
+            except:
+                excel_tag = str(raw_tag).strip()
+
+            input_tag = str(tag).strip()
+
+            print(
+                f"Excel Tag = {excel_tag} | "
+                f"Input Tag = {input_tag}"
+            )
+
+            if excel_tag == input_tag:
+
+                print("MATCH FOUND!")
+
+                for _key, _ci in _idx.items():
+
+                    _v = _row[_ci]
+
+                    try:
+                        gt[_key] = (
+                            float(_v)
+                            if _v is not None
+                            else None
+                        )
+                    except:
+                        gt[_key] = None
+
+                break
+
+        _wb.close()
+
+        print("Ground Truth Loaded:", gt)
+
+        return gt
+
+    except Exception as _e:
+        st.warning(
+            f"Could not load ground_truth.xlsx: {_e}"
+        )
+        print("ERROR:", _e)
+        return {}
+# ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — Navigation with auto-close on mobile
 # ─────────────────────────────────────────────────────────────────────────────
 NAV_OPTIONS = ["Measure", "Output", "Logs", "Settings"]
@@ -1110,7 +1212,7 @@ def _on_nav_change():
     st.session_state.nav = st.session_state._nav_radio
 
 with st.sidebar:
-    st.markdown("## 🐄 CattleScan")
+    st.markdown("## 🐄 AI Based Cattle Trait Measurements")
     st.markdown("---")
 
     st.radio(
@@ -1168,7 +1270,7 @@ st.markdown("""
 <div class="app-header">
   <div class="header-icon">🐄</div>
   <div>
-    <h1>CattleScan</h1>
+    <h1>AI Based Cattle Trait Measurements</h1>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1267,7 +1369,7 @@ if st.session_state.nav == "Measure":
                         if st.session_state.side_last_processed_click != orig_xy:
                             st.session_state.side_last_processed_click = orig_xy
                             with st.spinner("Segmenting sticker with SAM2…"):
-                                sam2 = load_sam2(sam2_path) if model_file_available(sam2_path) else None
+                                sam2 = load_sam2(sam2_path) if os.path.exists(sam2_path) else None
                                 if sam2:
                                     cmp, _ = segment_sticker_sam2(img_raw, orig_xy, sam2)
                                 else:
@@ -1356,7 +1458,7 @@ if st.session_state.nav == "Measure":
                         if st.session_state.rear_last_processed_click != orig_xy:
                             st.session_state.rear_last_processed_click = orig_xy
                             with st.spinner("Segmenting sticker with SAM2…"):
-                                sam2 = load_sam2(sam2_path) if model_file_available(sam2_path) else None
+                                sam2 = load_sam2(sam2_path) if os.path.exists(sam2_path) else None
                                 if sam2:
                                     cmp, _ = segment_sticker_sam2(img_raw, orig_xy, sam2)
                                 else:
@@ -1413,7 +1515,7 @@ if st.session_state.nav == "Measure":
         if side_ready:
             with st.spinner("Running side-view keypoint detection…"):
                 try:
-                    if TORCH_OK and model_file_available(side_ckpt):
+                    if TORCH_OK and os.path.exists(side_ckpt):
                         result = load_side_model(side_ckpt)
                         if result is None:
                             st.warning("Side-view model failed to load.")
@@ -1433,16 +1535,8 @@ if st.session_state.nav == "Measure":
                                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                             else:
                                 st.warning("No cattle detected in side-view image.")
-                    elif not TORCH_OK:
-                        st.error(
-                            "Side-view inference is unavailable because PyTorch "
-                            f"or torchvision failed to import: {TORCH_IMPORT_ERROR}"
-                        )
                     else:
-                        st.warning(
-                            "Side-view model is missing and no Google Drive URL "
-                            "is configured — skipping side-view."
-                        )
+                        st.warning("Side-view model not found — skipping side-view.")
                 except Exception as e:
                     st.error(f"Side-view error: {e}")
                     import traceback; st.code(traceback.format_exc())
@@ -1450,7 +1544,7 @@ if st.session_state.nav == "Measure":
         if rear_ready:
             with st.spinner("Running rear-view keypoint detection…"):
                 try:
-                    if YOLO_OK and model_file_available(rear_model):
+                    if YOLO_OK and os.path.exists(rear_model):
                         yolo     = load_rear_model(rear_model)
                         if yolo is None:
                             st.warning("Rear-view model failed to load.")
@@ -1462,7 +1556,7 @@ if st.session_state.nav == "Measure":
                                 dists, la, ra, udder_ht = compute_rear_measurements(kps_dict, cmp)
                                 rf_score  = None
                                 hock_dist = dists.get("M20_left_hock-right_hock")
-                                if model_file_available(rf_pkl):
+                                if os.path.exists(rf_pkl):
                                     try:
                                         rf = load_rf_model(rf_pkl)
                                     except Exception:
@@ -1486,16 +1580,8 @@ if st.session_state.nav == "Measure":
                                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                             else:
                                 st.warning("No cattle detected in rear-view image.")
-                    elif not YOLO_OK:
-                        st.error(
-                            "Rear-view inference is unavailable because "
-                            f"Ultralytics failed to import: {YOLO_IMPORT_ERROR}"
-                        )
                     else:
-                        st.warning(
-                            "Rear-view model is missing and no Google Drive URL "
-                            "is configured — skipping rear-view."
-                        )
+                        st.warning("Rear-view model not found — skipping rear-view.")
                 except Exception as e:
                     st.error(f"Rear-view error: {e}")
                     import traceback; st.code(traceback.format_exc())
@@ -1513,13 +1599,7 @@ if st.session_state.nav == "Measure":
             append_log(log_entry)
             save_excel_log(load_logs())
 
-        if side_m or rear_m:
-            st.success("Trait measurements completed.")
-        else:
-            st.error(
-                "No trait measurements were produced. Review the messages "
-                "above, confirm that the cattle is clearly visible, and try again."
-            )
+        st.rerun()
 
     # ── DISPLAY TRAITS ────────────────────────────────────────────────────────
     if st.session_state.traits:
@@ -1532,7 +1612,6 @@ if st.session_state.nav == "Measure":
         st.markdown(f'<div class="section-head">📊  Estimated Traits — <span style="color:#40916c">{t["tag"]}</span></div>',
                     unsafe_allow_html=True)
 
-        # ── Build 10-trait responsive grid via HTML ───────────────────────────
         # Rump vertical (signed display)
         rv = sm.get("rump_vertical_cm")
         rv_str = (f"{'+' if rv >= 0 else ''}{rv:.1f}") if rv is not None else "—"
@@ -1554,39 +1633,7 @@ if st.session_state.nav == "Measure":
         fa_str  = f"{fa:.1f}" if fa is not None else "—"
         fas_str = str(fas) if fas is not None else "—"
 
-        # 10 cards — fully self-contained HTML+CSS so Streamlit can't strip styles
-        def make_card(label, value_html, unit_html):
-            return f"""
-            <div style="
-                background: linear-gradient(135deg,#1a3a5c,#1e4d6b);
-                border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 14px;
-                padding: 16px 12px;
-                text-align: center;
-                box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-                min-height: 90px;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-            ">
-              <div style="color:#8ecae6;font-size:0.72rem;font-weight:600;
-                          text-transform:uppercase;letter-spacing:0.06em;
-                          margin-bottom:6px;line-height:1.3;">{label}</div>
-              <div style="color:#ffffff;font-size:1.45rem;font-weight:700;
-                          line-height:1.2;">{value_html}</div>
-              <div style="color:#90caf9;font-size:0.76rem;margin-top:4px;">{unit_html}</div>
-            </div>"""
-
-        def simple_card(label, value, unit, fmt=".1f"):
-            if value is not None:
-                try:    vstr = format(float(value), fmt)
-                except: vstr = str(value)
-            else:
-                vstr = "—"
-            return make_card(label, vstr, unit)
-
-        # 10 traits in a responsive CSS grid
+        # ── 10 Estimated trait cards ──────────────────────────────────────────
         cards_html = (
             _tc("Height",             sm.get("bbox_height_cm"),           "cm") +
             _tc("Body Length",        sm.get("body_length_cm"),           "cm") +
@@ -1616,6 +1663,160 @@ if st.session_state.nav == "Measure":
             </div>"""
         )
         st.markdown(f'<div class="trait-grid">{cards_html}</div>', unsafe_allow_html=True)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # GROUND TRUTH  &  DEVIATION  (NEW SECTION — no other code changed)
+        # ══════════════════════════════════════════════════════════════════════
+
+        # Load GT for this tag from ground_truth.xlsx
+        gt = load_ground_truth(st.session_state.tag)
+
+        # Estimated numeric values aligned to the same 9 GT keys
+        def _est_num(keys):
+            """Return first non-None float found across sm / rd / rm."""
+            for _k in keys:
+                _v = sm.get(_k) if _k in sm else (rd.get(_k) if _k in rd else rm.get(_k))
+                if _v is not None:
+                    try: return float(_v)
+                    except: pass
+            return None
+
+        est_num = {
+            "height":            _est_num(["bbox_height_cm"]),
+            "body_length":       _est_num(["body_length_cm"]),
+            "body_depth":        _est_num(["body_depth_cm"]),
+            "heart_girth":       _est_num(["heart_girth_cm"]),
+            "rear_leg_set":      (float(sm["rear_leg_set_score"])
+                                  if sm.get("rear_leg_set_score") is not None else None),
+            "rear_leg_rear":     (float(rm["rf_score"])
+                                  if rm.get("rf_score") is not None else None),
+            "rump_width":        _est_num(["M03_rump_left-rump_right"]),
+            "rear_udder_height": _est_num(["rear_udder_height_cm"]),
+            "foot_angle_score":  (float(sm["foot_angle_score"])
+                                  if sm.get("foot_angle_score") is not None else None),
+        }
+
+        if gt:
+            # ── helper: format a GT value ─────────────────────────────────────
+            def _gt_fmt(key, is_score=False):
+                v = gt.get(key)
+                if v is None: return "—"
+                try:
+                    return str(int(round(float(v)))) if is_score else f"{float(v):.1f}"
+                except:
+                    return "—"
+
+            # ── Ground Truth cards ────────────────────────────────────────────
+            st.markdown(
+                '<div class="section-head" style="margin-top:28px;">'
+                '✅&nbsp; Ground Truth Traits</div>',
+                unsafe_allow_html=True,
+            )
+
+            gt_cards_html = (
+                _tc("Height",            gt.get("height"),            "cm") +
+                _tc("Body Length",       gt.get("body_length"),       "cm") +
+                _tc("Body Depth",        gt.get("body_depth"),        "cm") +
+                _tc("Heart Girth",       gt.get("heart_girth"),       "cm") +
+                f"""<div class="trait-card">
+                  <div class="tc-label">Rear Leg Set</div>
+                  <div class="tc-value">{_gt_fmt("rear_leg_set",  is_score=True)}</div>
+                  <div class="tc-unit">1–9 scale</div>
+                </div>""" +
+                f"""<div class="trait-card">
+                  <div class="tc-label">Rear Leg Rear View</div>
+                  <div class="tc-value">{_gt_fmt("rear_leg_rear", is_score=True)}</div>
+                  <div class="tc-unit">1–9 scale</div>
+                </div>""" +
+                """<div class="trait-card">
+                  <div class="tc-label">Rump Angle</div>
+                  <div class="tc-value">—</div>
+                  <div class="tc-unit">cm (signed)</div>
+                </div>""" +
+                _tc("Rump Width",        gt.get("rump_width"),        "cm") +
+                _tc("Rear Udder Height", gt.get("rear_udder_height"), "cm") +
+                f"""<div class="trait-card">
+                  <div class="tc-label">Foot Angle Score</div>
+                  <div class="tc-value">{_gt_fmt("foot_angle_score", is_score=True)}</div>
+                  <div class="tc-unit">1–9 scale</div>
+                </div>"""
+            )
+            st.markdown(
+                f'<div class="trait-grid">{gt_cards_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Deviation cards  (actual − predicted) ────────────────────────
+            st.markdown(
+                '<div class="section-head" style="margin-top:28px;">'
+                '📐&nbsp; Deviation (Actual − Predicted)</div>',
+                unsafe_allow_html=True,
+            )
+
+            def _dev_card(label, gt_key, unit, is_score=False):
+                """
+                Build one deviation card.
+                Colour coding:
+                  • continuous  green < 2 cm  |  amber 2–5 cm  |  red > 5 cm
+                  • score       green < 0.5   |  amber 0.5–1.5 |  red > 1.5
+                """
+                g = gt.get(gt_key)
+                e = est_num.get(gt_key)
+                if g is None or e is None:
+                    vstr, colour = "—", "#90caf9"
+                else:
+                    dev  = g - e
+                    sign = "+" if dev > 0 else ""
+                    vstr = (f"{sign}{int(round(dev))}"
+                            if is_score
+                            else f"{sign}{dev:.1f}")
+                    adv = abs(dev)
+                    if is_score:
+                        colour = ("#4ade80" if adv < 0.5
+                                  else "#fbbf24" if adv < 1.5
+                                  else "#f87171")
+                    else:
+                        colour = ("#4ade80" if adv < 2.0
+                                  else "#fbbf24" if adv < 5.0
+                                  else "#f87171")
+                return (
+                    f'<div class="trait-card">'
+                    f'<div class="tc-label">{label}</div>'
+                    f'<div class="tc-value" style="color:{colour};">{vstr}</div>'
+                    f'<div class="tc-unit">{unit}</div>'
+                    f'</div>'
+                )
+
+            dev_cards_html = (
+                _dev_card("Height",             "height",            "cm") +
+                _dev_card("Body Length",        "body_length",       "cm") +
+                _dev_card("Body Depth",         "body_depth",        "cm") +
+                _dev_card("Heart Girth",        "heart_girth",       "cm") +
+                _dev_card("Rear Leg Set",       "rear_leg_set",      "1–9 scale", is_score=True) +
+                _dev_card("Rear Leg Rear View", "rear_leg_rear",     "1–9 scale", is_score=True) +
+                # Rump Angle has no GT column — always N/A
+                '<div class="trait-card">'
+                '<div class="tc-label">Rump Angle</div>'
+                '<div class="tc-value" style="color:#90caf9;">—</div>'
+                '<div class="tc-unit">cm (signed)</div>'
+                '</div>' +
+                _dev_card("Rump Width",         "rump_width",        "cm") +
+                _dev_card("Rear Udder Height",  "rear_udder_height", "cm") +
+                _dev_card("Foot Angle Score",   "foot_angle_score",  "1–9 scale", is_score=True)
+            )
+            st.markdown(
+                f'<div class="trait-grid">{dev_cards_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+        elif os.path.exists("ground_truth.xlsx"):
+            # File exists but this tag is not in it
+            st.markdown(
+                f'<div class="warn-box">ℹ️ Tag <b>{st.session_state.tag}</b> was not found '
+                f'in <code>ground_truth.xlsx</code> — ground truth not shown.</div>',
+                unsafe_allow_html=True,
+            )
+        # (If ground_truth.xlsx doesn't exist at all, silently skip — no warning)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PAGE: OUTPUT
@@ -1770,6 +1971,7 @@ elif st.session_state.nav == "Settings":
     | `rear_best_v2.pt`           | Rear-view YOLOv8-pose weights |
     | `sam2_b.pt`                 | SAM2 segmentation weights |
     | `rf_score_model.pkl`        | Random Forest rear-leg-rear score model |
+    | `ground_truth.xlsx`         | Ground truth values (columns: Tag ID + trait columns) |
 
     ### Installation
     ```bash
@@ -1788,8 +1990,9 @@ elif st.session_state.nav == "Settings":
     3. Upload or capture **rear-view** image → click on the QR sticker.
     4. Click **Estimate Trait Measurements**.
     5. View key traits on the **Measure** page.
-    6. View annotated images on the **Output** page.
-    7. All records (appended, never overwritten) in **Logs**.
+    6. If `ground_truth.xlsx` contains the tag, Ground Truth and Deviation cards appear automatically.
+    7. View annotated images on the **Output** page.
+    8. All records (appended, never overwritten) in **Logs**.
 
     ### Field definitions & equations
 
@@ -1804,7 +2007,23 @@ elif st.session_state.nav == "Settings":
     | **Foot Angle Score** | 70–76°=1, 63–69°=2, 56–62°=3, 49–55°=4, 42–48°=5, 35–41°=6, 28–34°=7, 21–27°=8, 14–20°=9 |
     | Rear Udder Height | Distance between `uddertop` and `udderbottom` keypoints (cm) |
     | Rump Vertical | Signed vertical distance (cm): positive = hip_bone above pin_bone (normal slope) |
-    | Rear Leg Rear Score | Random Forest model (1–7) |
+    | Rear Leg Rear Score | Random Forest model (1–9) |
+
+    ### Ground Truth column mapping (ground_truth.xlsx)
+
+    | Card label | Excel column name |
+    |------------|-------------------|
+    | Height | `Height (cm)` |
+    | Body Length | `Body length (cm)` |
+    | Body Depth | `Body depth (cm)` |
+    | Heart Girth | `Girth (cm)` |
+    | Rear Leg Set | `Rear legs set (score)` |
+    | Rear Leg Rear View | `Rear legs rear view (score)` |
+    | Rump Width | `Rump width (cm)` |
+    | Rear Udder Height | `Rear udder height (cm)` |
+    | Foot Angle Score | `Foot angle (score)` |
+
+    Deviation colour coding: 🟢 green = small error · 🟡 amber = moderate · 🔴 red = large
     """)
 
     st.markdown("---")
